@@ -84,6 +84,7 @@ export function docHilo({ siteName, thread, board, posts }) {
     }
     const marcas = [post.esAutorOp ? 'OP' : null, post.sage ? 'sage' : null].filter(Boolean).join(' · ');
     bloques.push(t(3, `No.${post.id} · ID ${post.anon}${marcas ? ` · ${marcas}` : ''} · ${fecha(post.created_at)}`));
+    if (post.foto) bloques.push(link(`/f/${post.foto.archivo}.webp`, `[foto ${post.foto.ancho}×${post.foto.alto}]`, true));
     // Las líneas que empiezan con > (sin ser >>123) son citas, igual que en la web.
     for (const linea of sinSpoilers(post.body).replace(/\r\n?/g, '\n').split('\n')) {
       bloques.push(/^>(?!>\d)/.test(linea) ? { tipo: 'cita', texto: linea.replace(/^>\s?/, '') } : { tipo: 'usuario', texto: linea });

@@ -19,6 +19,8 @@
     "@anthropic-ai/sdk": "^0.125.0",
     "better-sqlite3": "^12.11.1",
     "express": "^5.2.1",
+    "multer": "^2.4.0",
+    "sharp": "^0.35.5",
     "zod": "^4.6.4"
   }
 }

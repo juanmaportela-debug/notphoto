@@ -18,14 +18,17 @@
   // sección, y lo escrito tiene que seguir a la persona aunque cambie de página. Cada respuesta es
   // un formulario distinto, así que va aparte.
   const clave = (form) => {
-    const responder = (form.getAttribute('action') || '').match(/\/h\/(\d+)\/responder$/);
+    const accion = form.getAttribute('action') || '';
+    if (accion === '/fotos') return PREFIJO + 'foto';
+    const responder = accion.match(/\/h\/(\d+)\/responder$/);
     return PREFIJO + (responder ? `respuesta:${responder[1]}` : 'nuevo');
   };
 
   // Solo lo que la persona escribe: ni botones (el de la vista previa se llama "vista") ni campos
   // escondidos, que si no el formulario nunca cuenta como vacío y el borrador viejo no se borra.
   const campos = (form) =>
-    [...form.elements].filter((c) => c.name && /^(INPUT|SELECT|TEXTAREA)$/.test(c.tagName) && c.type !== 'hidden');
+    // El archivo de una foto tampoco: un <input type="file"> no se puede volver a llenar desde un script.
+    [...form.elements].filter((c) => c.name && /^(INPUT|SELECT|TEXTAREA)$/.test(c.tagName) && c.type !== 'hidden' && c.type !== 'file');
 
   const leer = (form) => {
     try {
@@ -215,6 +218,7 @@
       if (campo.type === 'checkbox') campo.checked = false;
       else campo.value = '';
     }
+    for (const archivo of form.querySelectorAll('input[type="file"]')) archivo.value = ''; // vaciarlo sí se puede
     for (const nodo of form.querySelectorAll('.error, .vista-previa')) nodo.remove();
     borrar(form);
     for (const [campo, actualizar] of contadores) if (campo.form === form) actualizar();

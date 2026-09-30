@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openDb, limpiarVencidos } from './db.js';
 import { createApp } from './app.js';
-import { crearModerador } from './moderation.js';
+import { crearModerador, crearModeradorFoto } from './moderation.js';
 import { crearGoogle } from './google.js';
 import { crearCapsula } from './gemini.js';
 import { crearSombra, crearFiltroMixto } from './sombra.js';
@@ -51,6 +51,9 @@ const app = createApp({
   // Con clave de TypeSafe, filtro mixto: Jev primero, Claude solo para lo que Jev ve dudoso.
   moderar: jev ? crearFiltroMixto({ jev, claude: crearModerador({ siteName }) }) : crearModerador({ siteName }),
   jevActivo: !!jev,
+  moderarFoto: crearModeradorFoto({ siteName }),
+  // Las fotos van en disco, al lado de la base salvo que se diga otra cosa (en Railway, un volumen).
+  fotosDir: path.resolve(raiz, process.env.FOTOS_DIR || path.join(path.dirname(process.env.DB_PATH || 'data/textboard.db'), 'fotos')),
   alcanceKey: process.env.ALCANCE_KEY || null,
   geminiUrl: process.env.GEMINI_URL || null,
   codigoUrl: process.env.CODIGO_URL || null,

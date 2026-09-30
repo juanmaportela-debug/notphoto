@@ -1,7 +1,12 @@
 import express from 'express';
+import multer from 'multer';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BOARDS, LIMITS, boardBySlug } from './config.js';
+import { BOARDS, BOARDS_TEXTO, LIMITS, boardBySlug, rutaTablon } from './config.js';
+import { FotoInvalida, procesarFoto, crearAlmacen, nombreNuevo, NOMBRE_ARCHIVO, diaValido, moverDia } from './fotos.js';
 import { NORMAS } from './normas.js';
 import * as V from './views.js';
 import { extracto, textoPlano, sinSpoilers } from './format.js';
@@ -66,6 +71,10 @@ export function createApp({
   jevActivo = false,
   // Título de la última nota de 421 para el link de la barra (src/nota421.js); null = sin título.
   ultimaNota421 = () => null,
+  // Filtro de imágenes (crearModeradorFoto en moderation.js). Sin filtro, toda foto va a revisión humana.
+  moderarFoto = async () => ({ decision: 'queue', rule: 'sin-filtro', reason: '', grave: 'ninguna' }),
+  // Carpeta de las fotos. Sin carpeta (tests), una temporal.
+  fotosDir = null,
 }) {
   const app = express();
   app.disable('x-powered-by');
@@ -88,12 +97,12 @@ export function createApp({
     hilo: db.prepare('SELECT * FROM threads WHERE id = ?'),
     post: db.prepare('SELECT * FROM posts WHERE id = ?'),
     contarPortada: db.prepare('SELECT COUNT(*) AS n FROM threads WHERE visible = 1 AND archived = 0'),
-    hilosPortada: db.prepare(`SELECT t.*, p.body AS op_body, p.user_id AS op_user_id, p.created_at AS op_created_at
-      FROM threads t JOIN posts p ON p.id = t.op_post_id
+    hilosPortada: db.prepare(`SELECT t.*, p.body AS op_body, p.user_id AS op_user_id, p.created_at AS op_created_at, f.archivo AS foto
+      FROM threads t JOIN posts p ON p.id = t.op_post_id LEFT JOIN fotos f ON f.post_id = p.id
       WHERE t.visible = 1 AND t.archived = 0 ORDER BY t.bumped_at DESC LIMIT ? OFFSET ?`),
     contarTablon: db.prepare('SELECT COUNT(*) AS n FROM threads WHERE board = ? AND visible = 1 AND archived = ?'),
-    hilosTablon: db.prepare(`SELECT t.*, p.body AS op_body, p.user_id AS op_user_id, p.created_at AS op_created_at
-      FROM threads t JOIN posts p ON p.id = t.op_post_id
+    hilosTablon: db.prepare(`SELECT t.*, p.body AS op_body, p.user_id AS op_user_id, p.created_at AS op_created_at, f.archivo AS foto
+      FROM threads t JOIN posts p ON p.id = t.op_post_id LEFT JOIN fotos f ON f.post_id = p.id
       WHERE t.board = ? AND t.visible = 1 AND t.archived = ? ORDER BY t.bumped_at DESC LIMIT ? OFFSET ?`),
     // Las últimas N respuestas publicadas de cada hilo de la lista (ids en JSON), sin el mensaje inicial.
     ultimasRespuestas: db.prepare(`SELECT * FROM (
@@ -155,6 +164,7 @@ export function createApp({
         (SELECT group_concat(r.motivo, ', ') FROM reports r WHERE r.post_id = p.id AND r.resolved = 0) AS reportes
       FROM posts p JOIN threads t ON t.id = p.thread_id JOIN users u ON u.id = p.user_id
       WHERE p.status = 'queued' ORDER BY p.created_at`),
+    fotoDePost: db.prepare('SELECT archivo, ancho, alto FROM fotos WHERE post_id = ? AND archivo IS NOT NULL'),
     reportadosMod: db.prepare(`SELECT p.*, t.board, t.subject, u.created_at AS user_created,
         (SELECT COUNT(*) FROM posts x WHERE x.user_id = p.user_id AND x.status = 'removed' AND x.body != '') AS eliminados,
         (SELECT group_concat(r.motivo, ', ') FROM reports r WHERE r.post_id = p.id AND r.resolved = 0) AS reportes
@@ -162,6 +172,18 @@ export function createApp({
       WHERE p.status = 'published' AND EXISTS (SELECT 1 FROM reports r WHERE r.post_id = p.id AND r.resolved = 0)
       ORDER BY p.created_at`),
   };
+
+  // --- Fotos: archivos ------------------------------------------------------------------------
+  const almacen = crearAlmacen(fotosDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'txt-fotos-')));
+  // Borra del disco las fotos que cumplen la condición y deja la fila sin archivo (el día sigue ocupado).
+  function olvidarFotos(donde, ...args) {
+    for (const f of db.prepare(`SELECT id, archivo FROM fotos WHERE archivo IS NOT NULL AND ${donde}`).all(...args)) {
+      db.prepare('UPDATE fotos SET archivo = NULL WHERE id = ?').run(f.id);
+      almacen.borrar(f.archivo);
+    }
+  }
+  // Agrega `foto` ({ archivo, ancho, alto } o null) a un mensaje. Solo los que abren una publicación de fotos la tienen.
+  const conFoto = (p) => (p ? { ...p, foto: q.fotoDePost.get(p.id) ?? null } : p);
 
   // --- Efectos de publicar y retirar -------------------------------------------------------
 
@@ -226,6 +248,8 @@ export function createApp({
     q.actualizarEstado.run(nuevo, modId, now(), postId);
     if (p.status === 'published') alRetirar(p);
     if (nuevo === 'published') alPublicar(postId);
+    // Una foto eliminada por un mod no queda en el servidor (el mensaje sí, para /mod y el log).
+    if (nuevo === 'removed') olvidarFotos('post_id = ?', postId);
     if (resolver) q.resolverReportes.run(postId);
     q.log.run(modId, accion, postId, p.user_id, nota, now());
     return true;
@@ -328,7 +352,7 @@ export function createApp({
     const [d, u] = String(leerCookies(req.headers.cookie).visita ?? '').split('.').map(Number);
     let desde = Number.isSafeInteger(d) && d > 0 ? d : null;
     const ultima = Number.isSafeInteger(u) && u > 0 && u <= now() ? u : null;
-    if (req.method !== 'GET' || /^\/(static|auth)\/|\.(txt|xml)$|\/nuevos$|^\/(robots\.txt|favicon|tema|vista)/.test(req.path)) return desde;
+    if (req.method !== 'GET' || /^\/(static|auth|f)\/|\.(txt|xml)$|\/nuevos$|^\/(robots\.txt|favicon|tema|vista)/.test(req.path)) return desde;
     if (!ultima || !desde) desde = now(); // primera vez (o cookie de antes de este cambio, con desde = 0)
     else if (now() - ultima > PAUSA_VISITA) desde = ultima;
     res.cookie('visita', `${desde ?? 0}.${now()}`, { httpOnly: true, sameSite: 'lax', secure: production, maxAge: 365 * DIA, path: '/' });
@@ -357,7 +381,7 @@ export function createApp({
     if (req.method !== 'GET') return;
     const ua = req.get('user-agent') ?? '';
     if (!ua || BOT.test(ua)) return;
-    if (/^\/(static|auth)\/|\.(txt|xml)$|\/nuevos$|^\/(robots\.txt|favicon|tema|vista)/.test(req.path)) return;
+    if (/^\/(static|auth|f)\/|\.(txt|xml)$|\/nuevos$|^\/(robots\.txt|favicon|tema|vista)/.test(req.path)) return;
     try {
       const dia = diaDe(now());
       if (sal.dia !== dia) {
@@ -486,7 +510,7 @@ export function createApp({
     if (!hilos.length) return [];
     const ultimas = q.ultimasRespuestas.all(JSON.stringify(hilos.map((t) => t.id)), LIMITS.respuestasEnResumen);
     return hilos.map((t) => {
-      const op = { id: t.op_post_id, body: t.op_body, user_id: t.op_user_id, created_at: t.op_created_at, status: 'published', sage: 0 };
+      const op = conFoto({ id: t.op_post_id, body: t.op_body, user_id: t.op_user_id, created_at: t.op_created_at, status: 'published', sage: 0 });
       const respuestas = ultimas.filter((p) => p.thread_id === t.id);
       for (const p of [op, ...respuestas]) {
         p.anon = anonId(p.user_id, t.id);
@@ -567,6 +591,8 @@ export function createApp({
       }
     }
     for (const p of posts) p.respuestas = respuestas.get(p.id) ?? [];
+    const op = posts.find((p) => p.id === thread.op_post_id);
+    if (op) op.foto = q.fotoDePost.get(op.id) ?? null;
     return { posts, ids };
   }
 
@@ -695,6 +721,7 @@ export function createApp({
     if (!cuerpo) return { error: 'El mensaje está vacío.' };
     if (cuerpo.length > LIMITS.cuerpo) return { error: `El mensaje puede tener hasta ${LIMITS.cuerpo} caracteres.` };
     if (esHilo && !asunto) return { error: 'Falta el asunto.' };
+    if (esHilo && board?.fotos) return { error: 'Las fotos se suben desde la web.' };
     if (asunto.length > LIMITS.asunto) return { error: `El asunto puede tener hasta ${LIMITS.asunto} caracteres.` };
     if (thread && (!thread.visible || thread.archived || thread.locked)) return { error: 'Esta publicación ya no acepta respuestas.' };
     const firma = firmaDe(esHilo ? 'hilo' : 'respuesta', esHilo ? board.slug : thread.id, asunto, cuerpo);
@@ -742,7 +769,7 @@ export function createApp({
       q_g.nuevoCodigo.run(codigo, huella, now());
       return codigo;
     },
-    secciones: BOARDS,
+    secciones: BOARDS_TEXTO,
     hilo: (id) => q.hilo.get(id) ?? null,
     tablon: (slug) => boardBySlug(slug) ?? null,
     responder: (user, thread, cuerpo) => escribirDesdeGemini(user, { thread, cuerpo }),
@@ -854,7 +881,7 @@ export function createApp({
     const hilos = db.prepare('SELECT id, bumped_at FROM threads WHERE visible = 1 ORDER BY bumped_at DESC LIMIT 45000').all();
     const urls = [
       { loc: '/', lastmod: hilos[0] ? fecha(hilos[0].bumped_at) : null },
-      ...BOARDS.map((b) => ({ loc: `/b/${b.slug}` })),
+      ...BOARDS.map((b) => ({ loc: rutaTablon(b) })),
       ...['/normas', '/formato', '/texto', '/terminos', '/privacidad'].map((loc) => ({ loc })),
       ...hilos.map((t) => ({ loc: `/h/${t.id}`, lastmod: fecha(t.bumped_at) })),
     ];
@@ -881,6 +908,9 @@ export function createApp({
   app.get('/privacidad', (req, res) =>
     enviar(res, { titulo: 'Privacidad', canonical: '/privacidad', descripcion: 'Qué datos guarda txt, con quién se comparten y cómo ejercer tus derechos (Ley 25.326).', cuerpo: V.privacidad(res.locals.ctx) }),
   );
+
+  // El tablón de fotos tiene su página propia (galería por día y formulario de subida).
+  app.get(['/b/fotos', '/b/fotos/archivo'], (req, res) => res.redirect(301, '/fotos'));
 
   app.get('/b/:board', (req, res) => {
     const board = boardBySlug(req.params.board);
@@ -1023,6 +1053,7 @@ export function createApp({
     const bloqueo = motivoBloqueo(req.user, 'hilo');
     if (bloqueo) return fallar(bloqueo, 429);
     if (!board) return fallar('Elegí en qué tablón publicarlo.');
+    if (board.fotos) return fallar('En Fotos se publica subiendo una foto, desde /fotos.');
     if (!asunto) return fallar('Falta el asunto.');
     if (asunto.length > LIMITS.asunto) return fallar(`El asunto puede tener hasta ${LIMITS.asunto} caracteres.`);
     if (!cuerpo) return fallar('El mensaje está vacío.');
@@ -1109,7 +1140,7 @@ export function createApp({
     // Las mismas reglas que el POST: el propio mensaje o una cuenta suspendida vuelven a la publicación.
     if (post.user_id === req.user.id || suspendido(req.user)) return res.redirect(303, volver);
     const autorOp = q.post.get(thread.op_post_id)?.user_id;
-    const p = { ...post, anon: anonId(post.user_id, thread.id), esAutorOp: post.user_id === autorOp };
+    const p = conFoto({ ...post, anon: anonId(post.user_id, thread.id), esAutorOp: post.user_id === autorOp });
     enviar(res, { titulo: 'Reportar', indexar: false, cuerpo: V.reportar(res.locals.ctx, { post: p, thread, volver }) });
   });
 
@@ -1157,6 +1188,7 @@ export function createApp({
     db.prepare(`UPDATE posts SET body = '', status = 'removed', mod_reason = NULL WHERE id = ?`).run(p.id);
     db.prepare(`UPDATE busqueda SET asunto = '', cuerpo = '' WHERE rowid = ?`).run(p.id);
     db.prepare('DELETE FROM notificaciones WHERE post_id = ?').run(p.id);
+    olvidarFotos('post_id = ?', p.id);
     q.log.run(null, 'borrar-mensaje', p.id, p.user_id, null, now());
   });
 
@@ -1173,7 +1205,7 @@ export function createApp({
     const thread = post && hiloVisible(req, post.thread_id);
     if (!thread) return noEncontrado(res);
     const autorOp = q.post.get(thread.op_post_id)?.user_id;
-    const p = { ...post, anon: anonId(post.user_id, thread.id), esAutorOp: post.user_id === autorOp, esMio: true };
+    const p = conFoto({ ...post, anon: anonId(post.user_id, thread.id), esAutorOp: post.user_id === autorOp, esMio: true });
     const cuerpo = V.borrar(res.locals.ctx, { post: p, thread, volver: `/h/${thread.id}#p${post.id}`, motivo: motivoParaNoBorrar(post, req.user) });
     enviar(res, { titulo: 'Borrar', indexar: false, cuerpo });
   });
@@ -1197,6 +1229,162 @@ export function createApp({
     res.redirect(303, `/h/${thread.id}`);
   });
 
+  // --- Fotos ---------------------------------------------------------------------------------
+  // Una foto por cuenta por día (el día del sitio, TZ_SITIO). Cada foto abre una publicación en el
+  // tablón de fotos y se comenta con texto, como el resto del sitio. Antes de publicarse pasa por el
+  // filtro de imágenes (moderarFoto), con las mismas decisiones que el de texto: approve, queue o
+  // reject, y los casos graves suspenden la cuenta en el acto.
+  const TABLON_FOTOS = BOARDS.find((b) => b.fotos);
+  const qf = {
+    delDia: db.prepare(`SELECT f.archivo, t.id AS thread_id, t.subject, t.reply_count
+      FROM fotos f JOIN posts p ON p.id = f.post_id JOIN threads t ON t.id = p.thread_id
+      WHERE f.dia = ? AND f.archivo IS NOT NULL AND p.status = 'published' AND t.visible = 1
+      ORDER BY f.id DESC LIMIT ? OFFSET ?`),
+    contarDelDia: db.prepare(`SELECT COUNT(*) AS n FROM fotos f JOIN posts p ON p.id = f.post_id JOIN threads t ON t.id = p.thread_id
+      WHERE f.dia = ? AND f.archivo IS NOT NULL AND p.status = 'published' AND t.visible = 1`),
+    mia: db.prepare(`SELECT f.estado, f.post_id, p.thread_id, p.status
+      FROM fotos f LEFT JOIN posts p ON p.id = f.post_id WHERE f.user_id = ? AND f.dia = ?`),
+    insertar: db.prepare(`INSERT INTO fotos (user_id, dia, estado, post_id, archivo, ancho, alto, created_at)
+      VALUES (@user_id, @dia, @estado, @post_id, @archivo, @ancho, @alto, @created_at)`),
+    porArchivo: db.prepare(`SELECT f.user_id, p.status, t.visible
+      FROM fotos f JOIN posts p ON p.id = f.post_id JOIN threads t ON t.id = p.thread_id WHERE f.archivo = ?`),
+  };
+  const hoy = () => diaDe(now());
+  const esUnico = (err) => err?.code === 'SQLITE_CONSTRAINT_UNIQUE';
+  const tituloPorDefecto = (dia) =>
+    `Foto del ${new Intl.DateTimeFormat('es-AR', { day: 'numeric', month: 'long', timeZone: 'UTC' }).format(new Date(`${dia}T12:00:00Z`))}`;
+
+  function renderFotos(req, res, { form = {}, status = 200 } = {}) {
+    res.locals.ctx.ruta = rutaDeLaPagina(req, '/fotos');
+    const dHoy = hoy();
+    const dia = diaValido(req.query.dia) && req.query.dia <= dHoy ? req.query.dia : dHoy;
+    const total = qf.contarDelDia.get(dia).n;
+    const { pagina, paginas, porPagina, offset } = paginar(req, total, LIMITS.fotosPorPagina);
+    const cuerpo = V.fotos(res.locals.ctx, {
+      dia,
+      hoy: dHoy,
+      anterior: moverDia(dia, -1),
+      siguiente: dia < dHoy ? moverDia(dia, 1) : null,
+      fotos: qf.delDia.all(dia, porPagina, offset),
+      total,
+      pagina,
+      paginas,
+      mia: req.user ? qf.mia.get(req.user.id, dHoy) : null,
+      form,
+    });
+    enviar(
+      res,
+      {
+        titulo: dia === dHoy ? 'Fotos de hoy' : `Fotos del ${V.nombreDia(dia)}`,
+        descripcion: TABLON_FOTOS.descripcion,
+        canonical: dia === dHoy ? '/fotos' : `/fotos?dia=${dia}`,
+        indexar: pagina === 1,
+        cuerpo,
+        aviso: req.query.aviso,
+      },
+      status,
+    );
+  }
+
+  app.get('/fotos', (req, res) => renderFotos(req, res));
+
+  // La imagen. Pública si su publicación está publicada; si está en revisión, solo para su autor y
+  // los mods; si la bajaron, el archivo ya no existe. No se guarda en cachés compartidas: si un mod
+  // la baja, deja de verse enseguida.
+  app.get('/f/:nombre', (req, res) => {
+    const m = NOMBRE_ARCHIVO.exec(req.params.nombre);
+    const f = m && qf.porArchivo.get(m[1]);
+    if (!f) return noEncontrado(res);
+    const publica = f.status === 'published' && f.visible === 1;
+    const propia = !!req.user && req.user.id === f.user_id && f.status === 'queued';
+    const deMod = esMod(req.user) && !suspendido(req.user);
+    if (!publica && !propia && !deMod) return noEncontrado(res);
+    res.set('Cache-Control', publica ? 'private, max-age=300' : 'private, no-store');
+    res.type('image/webp').sendFile(almacen.ruta(m[1], !!m[2]), (err) => {
+      if (err && !res.headersSent) noEncontrado(res);
+    });
+  });
+
+  const recibirFoto = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: LIMITS.fotoMaxBytes, files: 1, fields: 8, fieldSize: 16 * 1024, parts: 10 },
+  }).single('foto');
+
+  app.post('/fotos', (req, res, next) => {
+    if (!req.user) return res.redirect(303, '/entrar');
+    const fallar = (error, status = 422, form = {}) => renderFotos(req, res, { form: { ...form, error }, status });
+    // Antes de recibir el archivo: si no puede subir, no se lee.
+    if (suspendido(req.user)) return fallar(`Tu cuenta está suspendida hasta el ${V.fecha(req.user.banned_until)}.`, 403);
+    const mia = qf.mia.get(req.user.id, hoy());
+    // Ya subió hoy (o es el segundo toque de un doble envío que ya terminó): a su foto.
+    if (mia?.thread_id) return res.redirect(303, `/h/${mia.thread_id}?aviso=foto-hoy`);
+    if (mia) return fallar('Tu foto de hoy no pasó el filtro. La próxima, mañana.', 409);
+    recibirFoto(req, res, (err) => {
+      if (err) {
+        const grande = err.code === 'LIMIT_FILE_SIZE';
+        return fallar(grande ? `La foto puede pesar hasta ${Math.round(LIMITS.fotoMaxBytes / 1024 / 1024)} MB.` : 'No se pudo recibir la foto. Probá de nuevo.', grande ? 413 : 400);
+      }
+      subirFoto(req, res, fallar).catch(next);
+    });
+  });
+
+  async function subirFoto(req, res, fallar) {
+    if (!exigirUsuario(req, res)) return;
+    const asunto = limpiarTexto(req.body.asunto).replace(/\n+/g, ' ');
+    const cuerpo = limpiarTexto(req.body.cuerpo);
+    const error = (texto, status = 422) => fallar(texto, status, { asunto, cuerpo });
+    if (!req.file?.size) return error('Elegí una foto.');
+    if (asunto.length > LIMITS.fotoAsunto) return error(`El título puede tener hasta ${LIMITS.fotoAsunto} caracteres.`);
+    if (cuerpo.length > LIMITS.fotoTexto) return error(`El texto puede tener hasta ${LIMITS.fotoTexto} caracteres.`);
+    const bloqueo = motivoBloqueo(req.user, 'respuesta');
+    if (bloqueo) return error(bloqueo, 429);
+
+    let foto;
+    try {
+      foto = await procesarFoto(req.file.buffer);
+    } catch (err) {
+      if (err instanceof FotoInvalida) return error(err.message);
+      throw err;
+    }
+    // El día se fija al recibirla: si el filtro tarda y pasa la medianoche, cuenta para el día en que se subió.
+    const dia = hoy();
+    const userId = req.user.id;
+    const firma = firmaDe('foto', dia, sha256(req.file.buffer), asunto, cuerpo);
+    const r = await unaVez(userId, firma, async () => {
+      const v = await moderarFoto({ imagen: foto.filtro, asunto, cuerpo });
+      if (!cuentaVigente(userId)) return { destino: '/' };
+      const fila = { user_id: userId, dia, post_id: null, archivo: null, ancho: null, alto: null, created_at: now() };
+      if (v.decision === 'reject') {
+        // No se guarda la imagen: solo el rechazo (para /mod y el tope de rechazos) y el día ocupado.
+        try {
+          db.transaction(() => {
+            qf.insertar.run({ ...fila, estado: 'rechazada' });
+            registrarRechazo(userId, TABLON_FOTOS.slug, null, asunto || null, `[foto] ${cuerpo}`.trim(), v);
+          })();
+        } catch (err) {
+          if (!esUnico(err)) throw err;
+        }
+        return { error: 'No se publicó: la foto no cumple las normas. Hasta mañana no se puede subir otra.', status: 422 };
+      }
+      const archivo = nombreNuevo();
+      almacen.guardar(archivo, foto);
+      try {
+        const threadId = db.transaction(() => {
+          const id = crearHilo(TABLON_FOTOS.slug, asunto || tituloPorDefecto(dia), userId, cuerpo, v);
+          qf.insertar.run({ ...fila, estado: 'subida', post_id: q.hilo.get(id).op_post_id, archivo, ancho: foto.ancho, alto: foto.alto });
+          return id;
+        })();
+        return { destino: `/h/${threadId}${v.decision === 'queue' ? '?aviso=foto-cola' : ''}` };
+      } catch (err) {
+        almacen.borrar(archivo);
+        if (esUnico(err)) return { error: 'Ya subiste tu foto de hoy. La próxima, mañana.', status: 409 };
+        throw err;
+      }
+    });
+    if (r.destino) return res.redirect(303, r.destino);
+    error(r.error, r.status);
+  }
+
   // --- Moderación ----------------------------------------------------------------------------
 
   // Dónde se escribió un mensaje, para moderarlo con contexto: la publicación, los mensajes que cita
@@ -1218,7 +1406,7 @@ export function createApp({
 
   app.get('/mod', (req, res) => {
     if (!esMod(req.user)) return noEncontrado(res);
-    const nombrar = (p) => ({ ...p, board_nombre: boardBySlug(p.board)?.nombre ?? p.board, contexto: contextoMod(p.thread_id, p.body, p.created_at, p.id) });
+    const nombrar = (p) => conFoto({ ...p, board_nombre: boardBySlug(p.board)?.nombre ?? p.board, contexto: contextoMod(p.thread_id, p.body, p.created_at, p.id) });
     const graves = db
       .prepare(`SELECT r.id, r.user_id, r.board, r.thread_id, r.body, r.subject, r.rule, r.reason, r.grave, r.created_at, u.banned_until
         FROM rechazos r JOIN users u ON u.id = r.user_id WHERE r.grave IS NOT NULL ORDER BY r.id DESC LIMIT 50`)
@@ -1437,6 +1625,7 @@ export function createApp({
     db.prepare(`UPDATE posts SET body = '', status = 'removed', mod_reason = NULL WHERE user_id = ?`).run(userId);
     db.prepare(`UPDATE busqueda SET asunto = '', cuerpo = '' WHERE rowid IN (SELECT id FROM posts WHERE user_id = ?)`).run(userId);
     db.prepare('DELETE FROM rechazos WHERE user_id = ?').run(userId);
+    olvidarFotos('user_id = ?', userId);
     db.prepare('DELETE FROM reports WHERE user_id = ?').run(userId);
     db.prepare('DELETE FROM notificaciones WHERE user_id = ? OR post_id IN (SELECT id FROM posts WHERE user_id = ?)').run(userId, userId);
     db.prepare('DELETE FROM gemini_llaves WHERE user_id = ?').run(userId);

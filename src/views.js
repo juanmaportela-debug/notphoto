@@ -1,6 +1,7 @@
 import { html, raw, esc } from './html.js';
 import { estatico } from './estaticos.js';
-import { BOARDS, LIMITS, boardBySlug } from './config.js';
+import { BOARDS, BOARDS_TEXTO, LIMITS, boardBySlug, rutaTablon } from './config.js';
+import { urlFoto } from './fotos.js';
 import { NORMAS } from './normas.js';
 import { formatear, extracto, textoPlano } from './format.js';
 import { URL_421 } from './nota421.js';
@@ -32,6 +33,8 @@ const AVISOS = {
   'gemini-invalido': 'El código no existe o venció (dura 15 minutos). Pedí uno nuevo desde Gemini.',
   'gemini-suspendida': 'Mientras dure la suspensión no se pueden vincular certificados.',
   'gemini-tope': 'Llegaste al máximo de 5 certificados. Desvinculá alguno antes de sumar otro.',
+  'foto-cola': 'Tu foto quedó en revisión: la va a mirar una persona antes de publicarse. Mientras tanto solo la ves vos.',
+  'foto-hoy': 'Ya subiste tu foto de hoy: es esta. La próxima, mañana.',
 };
 
 const AYUDA = raw(
@@ -65,13 +68,13 @@ const leer421 = (ctx) =>
 function barraAbajo(ctx) {
   const { user, csrf, ruta = '/', novedades } = ctx;
   const camino = ruta.split('?')[0];
-  const seccion = camino.match(/^\/b\/([^/]+)/)?.[1];
-  const publicar = user ? `${seccion ? `/b/${seccion}` : '/'}?publicar=1#publicar` : '/entrar';
+  const seccion = camino === '/fotos' ? 'fotos' : camino.match(/^\/b\/([^/]+)/)?.[1];
+  const publicar = !user ? '/entrar' : seccion === 'fotos' ? '/fotos#subir' : `${seccion ? `/b/${seccion}` : '/'}?publicar=1#publicar`;
   const activa = (cond) => (cond ? raw(' class="activa"') : '');
   return html`<nav class="abajo" aria-label="Navegación">
   <a href="/"${activa(camino === '/')}><b>⌂</b>Inicio</a>
   <details class="abajo-menu"><summary${activa(!!seccion)}><b>☰</b>Secciones</summary>
-    <div class="menu-abajo">${BOARDS.map((b) => html`<a href="/b/${b.slug}">${b.nombre}</a>`)}${leer421(ctx)}</div>
+    <div class="menu-abajo">${BOARDS.map((b) => html`<a href="${rutaTablon(b)}">${b.nombre}</a>`)}${leer421(ctx)}</div>
   </details>
   <a href="${publicar}"><b>+</b>Publicar</a>
   ${user
@@ -173,7 +176,7 @@ ${user ? html`<script src="${estatico('formularios.js')}" defer></script>` : ''}
       </details>
     </div>
   </div>
-  <nav class="secciones">${BOARDS.map((b) => html` <a href="/b/${b.slug}"${(ruta.split('?')[0].match(/^\/b\/([^/]+)/)?.[1] === b.slug) ? raw(' class="activa"') : ''}>${b.nombre}</a>`)}<span class="sep-421" aria-hidden="true">|</span>${leer421(ctx)}</nav>
+  <nav class="secciones">${BOARDS.map((b) => html` <a href="${rutaTablon(b)}"${ruta.split('?')[0] === rutaTablon(b) || ruta.split('?')[0].match(/^\/b\/([^/]+)/)?.[1] === b.slug ? raw(' class="activa"') : ''}>${b.nombre}</a>`)}<span class="sep-421" aria-hidden="true">|</span>${leer421(ctx)}</nav>
 </header>
 <main>
 ${aviso && Object.hasOwn(AVISOS, aviso) ? html`<p class="aviso">${AVISOS[aviso]}</p>` : ''}
@@ -218,8 +221,9 @@ function catalogo(hilos, { conTablon = false } = {}) {
   return html`<div class="catalogo">${hilos.map(
     (t) => html`<article class="ficha">
     <div class="ficha-barra"><span>${conTablon ? boardBySlug(t.board)?.nombre : `No.${t.op_post_id}`}</span><span class="solo-eww"> · </span><span>${marcaNovedad(t)} R: ${t.reply_count}</span></div>
+    ${t.foto ? html`<img class="ficha-foto" src="${urlFoto(t.foto, true)}" alt="" width="${LIMITS.fotoMiniatura}" height="${LIMITS.fotoMiniatura}" loading="lazy">` : ''}
     <h2 class="ficha-titulo"><a class="ficha-asunto" href="/h/${t.id}"><strong>${t.subject}</strong></a></h2>
-    <div class="ficha-texto">${extracto(textoPlano(t.op_body), 180)}</div>
+    <div class="ficha-texto">${extracto(textoPlano(t.op_body), t.foto ? 90 : 180)}</div>
     <div class="ficha-pie">${fecha(t.bumped_at)}${t.locked ? ' · cerrada' : ''}</div>
   </article>`,
   )}</div>`;
@@ -333,7 +337,7 @@ function formHilo(ctx, board, { asunto = '', cuerpo = '', tablon = '', error, ab
       ? ''
       : html`<label>Tablón <select name="tablon" required>
       <option value="">Elegí dónde publicarlo</option>
-      ${BOARDS.map((b) => html`<option value="${b.slug}"${b.slug === tablon ? raw(' selected') : ''}>${b.nombre}</option>`)}
+      ${BOARDS_TEXTO.map((b) => html`<option value="${b.slug}"${b.slug === tablon ? raw(' selected') : ''}>${b.nombre}</option>`)}
     </select></label>`}
     <label>Asunto <input type="text" name="asunto" maxlength="${LIMITS.asunto}" required value="${asunto}"></label>
     <label>Mensaje <textarea name="cuerpo" rows="8" maxlength="${LIMITS.cuerpo}" required>${cuerpo}</textarea></label>
@@ -399,6 +403,7 @@ function vistaPost(ctx, p, { ids = new Set(), esOp = false, resumen = false }) {
       : ''}
   </header>
   ${p.status === 'queued' ? html`<p class="nota">En revisión: por ahora solo lo ves vos.</p>` : ''}
+  ${p.foto ? figuraFoto(p.foto, { mini: resumen }) : ''}
   <div class="texto">${raw(formatear(resumen ? extracto(p.body, 800) : p.body, { idsLocales: ids }))}</div>
   ${!resumen && p.respuestas?.length
     ? html`<p class="respuestas">Respuestas: ${p.respuestas.map((n) => html`<a href="#p${n}">&gt;&gt;${n}</a> `)}</p>`
@@ -407,6 +412,14 @@ function vistaPost(ctx, p, { ids = new Set(), esOp = false, resumen = false }) {
     ? html`<p class="acciones-post"><a class="citar" href="?cita=${p.id}#responder">Responder</a></p>`
     : ''}
 </article>`;
+}
+
+// La foto de una publicación del tablón de fotos. En los listados, la miniatura; en la publicación,
+// la grande, que lleva a la imagen sola. Sin texto alternativo escrito por el autor: el asunto y el
+// mensaje van justo al lado y un alt repetido se lee dos veces.
+function figuraFoto(foto, { mini = false } = {}) {
+  const lado = LIMITS.fotoMiniatura;
+  return html`<figure class="foto${mini ? ' mini' : ''}"><a href="${urlFoto(foto.archivo)}"><img src="${urlFoto(foto.archivo, mini)}" alt="Foto" width="${mini ? lado : foto.ancho}" height="${mini ? lado : foto.alto}"${mini ? raw(' loading="lazy"') : ''}></a></figure>`;
 }
 
 // Reportar un mensaje (/p/:id/reportar): el mensaje, como en los listados, y el motivo.
@@ -458,7 +471,7 @@ export function hilo(ctx, { thread, board, posts, ids, form, guardado = false })
   // página funciona igual que siempre.
   // En las publicaciones largas, links para ir al final y volver arriba (sin JavaScript).
   const larga = posts.length > 8;
-  return html`${formGuardar(ctx, thread, guardado)}<p class="ayuda" id="arriba"><a href="/b/${board.slug}">← ${board.nombre}</a>${botonGuardar(ctx, thread, guardado)}${larga ? html` · <a href="#fin">↓ Ir al final</a>` : ''}</p>
+  return html`${formGuardar(ctx, thread, guardado)}<p class="ayuda" id="arriba"><a href="${rutaTablon(board)}">← ${board.nombre}</a>${botonGuardar(ctx, thread, guardado)}${larga ? html` · <a href="#fin">↓ Ir al final</a>` : ''}</p>
 <h1>${thread.subject}</h1>
 ${estado}
 <div id="posts"${abierto ? raw(` data-hilo="${thread.id}" data-ultimo="${ultimo}"`) : ''}>
@@ -935,6 +948,7 @@ function itemMod(ctx, p) {
     ${hora(p.created_at)}
   </header>
   ${contextoMod(p.contexto)}
+  ${p.foto ? figuraFoto(p.foto) : ''}
   <div class="texto">${raw(formatear(p.body))}</div>
   <p class="ayuda">Filtro: ${filtro || '—'}</p>
   ${p.reportes ? html`<p class="ayuda">Reportes: ${p.reportes}</p>` : ''}
@@ -973,4 +987,52 @@ ${graves.length
 ${cola.length ? cola.map((p) => itemMod(ctx, p)) : html`<p class="ayuda">Nada pendiente.</p>`}
 <h2>Reportados (${reportados.length})</h2>
 ${reportados.length ? reportados.map((p) => itemMod(ctx, p)) : html`<p class="ayuda">Sin reportes abiertos.</p>`}`;
+}
+
+// --- Fotos ----------------------------------------------------------------------------------
+
+const formatoDia = new Intl.DateTimeFormat('es-AR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' });
+export const nombreDia = (dia) => formatoDia.format(new Date(`${dia}T12:00:00Z`));
+
+// El formulario para subir la foto del día, o por qué no se puede.
+function formFoto(ctx, { mia, asunto = '', cuerpo = '', error } = {}) {
+  const bloqueo = bloqueoPublicar(ctx, 'subir tu foto del día');
+  if (bloqueo) return bloqueo;
+  if (mia) {
+    if (mia.estado === 'rechazada') return html`<p class="nota" id="subir">Tu foto de hoy no pasó el filtro. La próxima, mañana.</p>${error ? html`<p class="error">${error}</p>` : ''}`;
+    return html`<p class="ayuda" id="subir">Ya subiste tu foto de hoy${mia.status === 'queued' ? ' (está en revisión)' : ''}: <a href="/h/${mia.thread_id}">verla</a>. La próxima, mañana.</p>`;
+  }
+  // form-post: formularios.js desactiva el botón mientras se revisa (el filtro tarda unos segundos).
+  return html`<details class="nuevo-hilo" id="subir"${error || asunto || cuerpo ? raw(' open') : ''}>
+  <summary>Subir mi foto de hoy</summary>
+  <form class="form-post form-foto" method="post" action="/fotos" enctype="multipart/form-data" autocomplete="off">
+    ${error ? html`<p class="error">${error}</p>` : ''}
+    <input type="hidden" name="_csrf" value="${ctx.csrf}">
+    <label>Foto <input type="file" name="foto" accept="image/jpeg,image/png,image/webp" required></label>
+    <label>Título (opcional) <input type="text" name="asunto" maxlength="${LIMITS.fotoAsunto}" value="${asunto}"></label>
+    <label>Texto (opcional) <textarea name="cuerpo" rows="3" maxlength="${LIMITS.fotoTexto}">${cuerpo}</textarea></label>
+    <p class="botones"><button>Subir</button> <a class="boton secundario cancelar" href="/fotos">Cancelar</a></p>
+    <p class="ayuda">Una por día: si no pasa el filtro, también cuenta. JPG, PNG o WebP de hasta ${Math.round(LIMITS.fotoMaxBytes / 1024 / 1024)} MB. Se achica y se le borran los datos ocultos (ubicación, teléfono, fecha) antes de guardarla.</p>
+  </form>
+</details>`;
+}
+
+export function fotos(ctx, { dia, hoy, anterior, siguiente, fotos: lista, total, pagina: actual, paginas, mia, form = {} }) {
+  const esHoy = dia === hoy;
+  return html`<header class="tablon-cabecera">
+  <h1>Fotos${esHoy ? ' de hoy' : ''}</h1>
+  <p>Una foto por día por persona. Se comenta con texto. <a href="/normas">Normas</a></p>
+</header>
+${esHoy ? formFoto(ctx, { mia, ...form }) : ''}
+<nav class="dias" aria-label="Días">
+  <a href="/fotos?dia=${anterior}" rel="prev">← Día anterior</a>
+  <strong>${nombreDia(dia)}${total ? ` · ${total} ${total === 1 ? 'foto' : 'fotos'}` : ''}</strong>
+  ${siguiente ? html`<a href="${siguiente === hoy ? '/fotos' : `/fotos?dia=${siguiente}`}" rel="next">Día siguiente →</a>` : html`<span></span>`}
+</nav>
+${lista.length
+  ? html`<div class="galeria">${lista.map(
+      (f) => html`<a class="galeria-foto" href="/h/${f.thread_id}"><img src="${urlFoto(f.archivo, true)}" alt="${f.subject}" width="${LIMITS.fotoMiniatura}" height="${LIMITS.fotoMiniatura}" loading="lazy"><span>${f.subject}${f.reply_count ? ` · ${f.reply_count}` : ''}</span></a>`,
+    )}</div>`
+  : html`<p class="ayuda">${esHoy ? 'Todavía no hay fotos hoy.' : 'No hay fotos de ese día.'}</p>`}
+${paginacion(actual, paginas, esHoy ? {} : { dia })}`;
 }

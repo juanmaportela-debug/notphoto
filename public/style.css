@@ -626,3 +626,30 @@ mark { background: var(--fosforo); color: var(--fondo); padding: 0 0.1rem; }
   .grafico svg.ancho { display: none; }
   .grafico svg.angosto { display: block; }
 }
+
+/* --- Fotos (src/fotos.js) -------------------------------------------------------------- */
+/* La foto va dentro del mensaje, con el mismo borde que todo lo demás. Sin filtros ni efectos: el
+   tema de consola no la tiñe. */
+.foto { margin: 0.2rem 0 0.6rem; }
+.foto a { display: inline-block; line-height: 0; }
+.foto a:hover { background: transparent; }
+.foto img { display: block; max-width: 100%; height: auto; max-height: 80vh; border: 1px solid var(--borde); }
+.foto.mini img { width: 12rem; max-height: none; aspect-ratio: 1; object-fit: cover; }
+.ficha-foto { display: block; width: calc(100% + 1.4rem); height: auto; aspect-ratio: 4 / 3; object-fit: cover; margin: 0 -0.7rem; }
+.form-foto input[type='file'] { display: block; margin-top: 0.3rem; color: var(--texto); font: inherit; font-size: 0.85rem; text-transform: none; }
+.form-foto input[type='file']::file-selector-button {
+  font: inherit;
+  margin-right: 0.6rem;
+  padding: 0.25rem 0.6rem;
+  background: var(--caja);
+  color: var(--fosforo);
+  border: 1px solid var(--fosforo);
+  cursor: pointer;
+}
+.dias { display: flex; justify-content: space-between; align-items: baseline; gap: 0.5rem; flex-wrap: wrap; margin: 0.5rem 0 1rem; font-size: 0.85rem; }
+.dias strong { color: var(--fosforo); text-align: center; }
+.galeria { display: grid; grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr)); gap: 0.6rem; }
+.galeria-foto { display: block; border: 1px solid var(--borde); background: var(--caja); text-decoration: none; color: var(--texto); }
+.galeria-foto:hover { border-color: var(--fosforo); background: var(--caja); color: var(--fosforo); }
+.galeria-foto img { display: block; width: 100%; height: auto; aspect-ratio: 1; object-fit: cover; }
+.galeria-foto span { display: block; padding: 0.3rem 0.45rem; font-size: 0.75rem; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }

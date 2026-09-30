@@ -185,6 +185,25 @@ export function openDb(archivo) {
     created_at INTEGER NOT NULL,
     ultimo_uso INTEGER
   )`);
+  // Fotos (src/fotos.js). Una por cuenta por día: lo garantiza UNIQUE (user_id, dia) y no un if, así
+  // dos envíos simultáneos no pueden entrar los dos. `dia` es la fecha en la zona del sitio (TZ_SITIO).
+  // Una foto rechazada por el filtro también ocupa el día (estado 'rechazada', sin archivo ni post): si
+  // no, se podría probar una imagen tras otra hasta dar con una que pase.
+  // `archivo` es un nombre al azar, sin nada de la cuenta; pasa a null cuando se borran los archivos
+  // (lo borra su autor, un mod o se borra la cuenta). Si se ve o no, lo decide el estado del post.
+  db.exec(`CREATE TABLE IF NOT EXISTS fotos (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    dia TEXT NOT NULL,
+    estado TEXT NOT NULL CHECK (estado IN ('subida', 'rechazada')),
+    post_id INTEGER UNIQUE REFERENCES posts (id),
+    archivo TEXT UNIQUE,
+    ancho INTEGER,
+    alto INTEGER,
+    created_at INTEGER NOT NULL,
+    UNIQUE (user_id, dia)
+  )`);
+  db.exec('CREATE INDEX IF NOT EXISTS fotos_dia ON fotos (dia, id)');
   db.exec(`CREATE TABLE IF NOT EXISTS gemini_codigos (codigo TEXT PRIMARY KEY, huella TEXT NOT NULL, created_at INTEGER NOT NULL)`);
   // Búsqueda de texto completo (la lupa). rowid = id del post; el asunto va solo en el mensaje inicial.
   // Sin tildes ni mayúsculas. Qué se muestra se decide al consultar (publicado y publicación visible),

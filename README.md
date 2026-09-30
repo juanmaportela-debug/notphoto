@@ -32,6 +32,18 @@ Node 20 · Express 5 · SQLite (`better-sqlite3`) · HTML armado en el servidor 
 | `src/google.js` | Login con Google (OAuth con PKCE), sin librerías. |
 | `public/` | CSS, los cuatro scripts (`vivo.js`, `formularios.js`, `tema.js`, `citas.js`) e íconos. |
 
+## Fotos (rama `fotos`)
+
+Este fork le suma un tablón **Fotos**: cada cuenta puede subir **una foto por día** y cada foto abre una publicación que se comenta con texto, como el resto del sitio. La página es `/fotos`, con la galería del día y navegación por días.
+
+- **Una por día, garantizado por la base.** La tabla `fotos` tiene `UNIQUE (user_id, dia)`, así que dos envíos simultáneos no pueden entrar los dos. El día es el de `TZ_SITIO` (Buenos Aires por defecto). Una foto que el filtro rechaza **también ocupa el día**: si no, se podría probar una imagen tras otra hasta que alguna pase.
+- **Nada se sirve tal cual.** `src/fotos.js` decodifica y vuelve a codificar todo con `sharp`: la endereza según el EXIF, la achica (1600 px máximo, más una miniatura de 480) y la guarda en WebP **sin metadatos**, es decir sin GPS, sin modelo de teléfono y sin fecha. Se valida el formato real, no la extensión: JPG, PNG, WebP o AVIF de hasta 12 MB.
+- **Moderada antes de publicar.** `crearModeradorFoto` (en `src/moderation.js`) le manda a Claude una copia JPEG de 1024 px junto con el título y el texto, y devuelve el mismo veredicto que el filtro de texto (`approve`, `queue` o `reject`, más los casos graves). Los casos graves suspenden la cuenta en el acto. Si la API falla o no hay `ANTHROPIC_API_KEY`, la foto va a revisión humana: el filtro falla cerrado.
+- **Quién ve qué.** Mientras está en revisión, la imagen (`/f/<nombre>.webp`) la ven solo su autor y los mods. Si la baja un mod, la borra su autor o se borra la cuenta, **el archivo se borra del disco**. Los nombres de archivo son al azar y no llevan nada de la cuenta.
+- Las fotos se guardan en `FOTOS_DIR` (por defecto `data/fotos`). En Railway conviene montar un volumen ahí.
+
+**Pendiente antes de abrirlo al público.** El filtro con un modelo de lenguaje no alcanza para las imágenes. Hace falta sumar la comparación contra bases de hashes de material de abuso conocido (por ejemplo PhotoDNA, o el escaneo de CSAM de Cloudflare si las imágenes pasan por Cloudflare), definir quién revisa la cola y consultar con un abogado qué obligaciones de denuncia y conservación hay. Hoy, un caso grave no se conserva: se rechaza sin guardar la imagen.
+
 ## Correrlo en tu máquina
 
 ```sh
